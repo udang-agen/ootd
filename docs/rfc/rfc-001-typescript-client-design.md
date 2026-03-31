@@ -58,7 +58,8 @@ ootd/
 ├── index.ts                 # Public API entry point
 ├── client/
 │   ├── DocumentumClient.ts  # Main client class
-│   └── builder.ts           # Fluent builder for client construction
+│   ├── builder.ts           # Fluent builder for client construction
+│   └── navigation.ts        # State-aware link navigation helpers
 ├── resources/
 │   ├── HomeDocument.ts      # Entry point resource
 │   ├── Repository.ts         # Repository resource
@@ -78,7 +79,8 @@ ootd/
 │   ├── query.ts             # DQL and search operations
 │   └── batch.ts             # Batch operation support
 ├── links/
-│   └── LinkRelation.ts       # Link relation constants and helpers
+│   ├── LinkRelation.ts       # Link relation constants and helpers
+│   └── LinkValidator.ts      # Link existence and state validation
 ├── options/
 │   ├── FeedOptions.ts        # Collection query options
 │   ├── SingleOptions.ts      # Single resource options
@@ -87,14 +89,17 @@ ootd/
 │   ├── Link.ts               # Hypermedia link model
 │   ├── PersistentObject.ts   # Base model for all objects
 │   └── errors/
-│       └── RestError.ts      # Structured error handling
-└── http/
-    └── typeGuards.ts         # Type guards for response discrimination
+│       ├── RestError.ts      # Structured error handling
+│       └── ValidationError.ts # Navigation validation errors
+├── http/
+│   └── typeGuards.ts         # Type guards for response discrimination
+└── streaming/
+    └── StreamHandler.ts      # ReadableStream handling for axios/fetch
 ```
 
 ### 3.2. Client Construction
 
-Following the Builder pattern from the Java client, but with TypeScript idioms:
+Following the Builder pattern from the Java client, but with TypeScript idioms and a mandatory initialization step:
 
 ```typescript
 import { DocumentumClient } from 'ootd';
@@ -113,6 +118,50 @@ const client = new DocumentumClient.Builder()
   .credentials('user', 'password')
   .repository('REPO01')
   .build(); // Automatically uses fetch if axios unavailable
+
+// ============================================================
+// MANDATORY: Initialize client before any operations
+// ============================================================
+// This step performs the "handshake" — fetches the Home Document
+// and acquires CSRF tokens from server headers. No business
+// operations can proceed until initialization completes.
+await client.initialize();
+
+// Now the client is ready for use
+const home = await client.getHomeDocument();
+```
+
+#### 3.2.1. Gated Initialization Design
+
+The client enforces a two-phase lifecycle to eliminate "blind spot" requests:
+
+| Phase | Method | Purpose |
+|---|---|---|
+| **Construction** | `new Builder().build()` | Creates client instance, configures base URL, credentials, repository |
+| **Initialization** | `client.initialize()` | Fetches Home Document, acquires CSRF token, validates repository access |
+| **Operational** | All other methods | Business operations (requires prior `initialize()`) |
+
+**Why gated initialization?**
+
+- **CSRF Token Acquisition**: The Home Document response contains CSRF token headers (for REST Services v7.2+). These must be captured before any mutating requests.
+- **Security Headers**: Prevents requests that might lack necessary security headers.
+- **Early Failure**: Validates repository existence and accessibility up-front rather than on first business operation.
+- **State Awareness**: The initialized client has the Home Document cached for link traversal.
+
+```typescript
+// Error: Client not initialized
+const client = new DocumentumClient.Builder()
+  .baseUrl('https://documentum-server/dctm-rest')
+  .credentials('user', 'password')
+  .repository('REPO01')
+  .build();
+
+// Throws ClientNotInitializedError
+await client.getCabinets();
+
+// Correct: Initialize first
+await client.initialize();
+await client.getCabinets(); // OK
 ```
 
 ### 3.3. Response Types (ADR-001)
@@ -128,6 +177,15 @@ type HttpResponse<T> = AxiosResponse<T> | Response;
 function isAxiosResponse<T>(resp: HttpResponse<T>): resp is AxiosResponse<T> {
   return 'data' in resp && 'config' in resp;
 }
+```
+
+For streaming responses, the discriminated union includes `ReadableStream`:
+
+```typescript
+type HttpStreamResponse = AxiosResponse<NodeJS.ReadableStream> | Response;
+
+// In fetch: Response.body is a ReadableStream | null
+// In axios (Node.js): response.data is NodeJS.ReadableStream when responseType is 'stream'
 ```
 
 ---
@@ -206,11 +264,14 @@ interface Cabinet extends Folder {
 
 ## 5. API Surface
 
-### 5.1. Entry Point
+### 5.1. Entry Point and Initialization
 
 ```typescript
 interface DocumentumClient {
-  // Bootstrap
+  // Gated initialization — MUST be called before any operations
+  initialize(): Promise<void>;
+
+  // Bootstrap (requires prior initialization)
   getHomeDocument(): Promise<HttpResponse<HomeDocument>>;
   getProductInfo(): Promise<HttpResponse<ProductInfo>>;
   getRepositories(): Promise<HttpResponse<Feed<Repository>>>;
@@ -234,11 +295,14 @@ interface DocumentumClient {
   // Documents
   getDocuments(parent: Linkable, options?: FeedOptions): Promise<HttpResponse<Feed<Document>>>;
   getDocument(id: string, options?: SingleOptions): Promise<HttpResponse<Document>>;
-  createDocument(parent: Linkable, doc: Partial<Document>): Promise<HttpResponse<Document>>;
+  createDocument(
+    parent: Linkable,
+    doc: Partial<Document>
+  ): Promise<HttpResponse<Document>>;
   createDocumentWithContent(
     parent: Linkable,
     doc: Partial<Document>,
-    content: Blob | Buffer,
+    content: ReadableStream | Blob | Buffer,
     contentType: string
   ): Promise<HttpResponse<Document>>;
 }
@@ -249,10 +313,57 @@ interface DocumentumClient {
 ```typescript
 interface DocumentumClient {
   getContents(doc: Document): Promise<HttpResponse<Feed<Content>>>;
-  getPrimaryContent(doc: Document): Promise<HttpResponse<Blob>>;
-  uploadContent(doc: Document, content: Blob | Buffer, contentType: string): Promise<HttpResponse<Content>>;
+  getPrimaryContent(doc: Document): Promise<HttpResponse<ReadableStream>>;
+  uploadContent(
+    doc: Document,
+    content: ReadableStream | Blob | Buffer,
+    contentType: string
+  ): Promise<HttpResponse<Content>>;
 }
 ```
+
+#### 5.3.1. Streaming Support (ReadableStream)
+
+The client supports `ReadableStream` for both downloads and uploads, providing a modern, high-performance way to handle large content across different environments (Node.js/Browser).
+
+**Download (Content Retrieval):**
+
+```typescript
+// Fetch the content as a stream
+const response = await client.getPrimaryContent(document);
+const stream = isAxiosResponse(response)
+  ? response.data as NodeJS.ReadableStream  // axios with responseType: 'stream'
+  : response.body as ReadableStream;         // native fetch
+
+// Process the stream
+const reader = stream.getReader();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  // Process chunk (value is Uint8Array)
+  processChunk(value);
+}
+```
+
+**Upload (Content Creation):**
+
+```typescript
+// Create a ReadableStream from a file or other source
+const fileStream = fs.createReadStream('large-file.pdf');
+const stream = ReadableStream.from(fileStream);
+
+await client.uploadContent(document, stream, 'application/pdf');
+```
+
+**Cross-Client Streaming Handling:**
+
+| HTTP Agent | Download Stream | Upload Stream |
+|---|---|---|
+| **fetch** | `Response.body` (ReadableStream) | Pass `ReadableStream` directly to `body` option |
+| **axios** (Node.js) | Requires `responseType: 'stream'` → `response.data` (Node.js Readable) | Convert to Node.js Readable or use `FormData` with stream |
+| **axios** (Browser) | `response.data` (Blob) | Pass `Blob` or use `FormData` |
+
+The `streaming/StreamHandler.ts` module provides utilities to handle these differences transparently, converting between stream types as needed while preserving the ADR-001 principle of minimal abstraction.
 
 ### 5.4. Version Management
 
@@ -311,6 +422,133 @@ function followLink<T extends Linkable>(resource: T, rel: string): Promise<HttpR
 
 This mirrors the .NET client's self-navigating model objects, but operates at the client level to maintain the ADR-001 principle of no abstraction overhead.
 
+### 6.1. State-Aware Navigation Helpers
+
+The navigation module (`client/navigation.ts`) provides **state-aware** link following with pre-flight validation:
+
+```typescript
+import { Navigation, LinkRelation } from 'ootd';
+
+// State-aware navigation with validation
+const cabinet = await Navigation.followWithValidation(
+  client,
+  repository,
+  LinkRelation.CABINETS,
+  { validateState: true }  // Check resource state before following
+);
+
+// Pre-flight checks:
+// 1. Existence: Does the link relation exist?
+// 2. State: Does the resource state allow this action?
+
+// Example: Cannot checkout a locked document
+const doc = await client.getDocument(id);
+try {
+  const checkedOut = await Navigation.followWithValidation(
+    client,
+    doc,
+    LinkRelation.CHECKOUT
+  );
+} catch (error) {
+  if (error instanceof ValidationError) {
+    console.log(`Cannot checkout: ${error.reason}`);
+    // Possible reasons:
+    // - LINK_MISSING: Relation doesn't exist
+    // - STATE_FORBIDDEN: Document is locked by another user
+    // - STATE_REQUIRED: Required properties missing for this action
+  }
+}
+```
+
+#### 6.1.1. LinkRelation Enum
+
+Strongly-typed link relation constants replace stringly-typed relations:
+
+```typescript
+enum LinkRelation {
+  SELF = 'self',
+  REPOSITORIES = 'repositories',
+  CABINETS = 'cabinets',
+  FOLDERS = 'folders',
+  DOCUMENTS = 'documents',
+  CONTENTS = 'contents',
+  PRIMARY_CONTENT = 'primary-content',
+  VERSIONS = 'versions',
+  CHECKOUT = 'checkout',
+  CANCEL_CHECKOUT = 'cancel-checkout',
+  CHECKIN_NEXT_MAJOR = 'checkin-next-major',
+  CHECKIN_NEXT_MINOR = 'checkin-next-minor',
+  LOCK = 'lock',
+  UNLOCK = 'unlock',
+  // ... other relations
+}
+```
+
+#### 6.1.2. ValidationError
+
+Pre-flight validation failures return a `ValidationError` before any network request:
+
+```typescript
+interface ValidationError extends Error {
+  code: 'LINK_MISSING' | 'STATE_FORBIDDEN' | 'STATE_REQUIRED';
+  resource: Linkable;
+  relation: string;
+  reason: string;
+  details?: Record<string, unknown>;
+}
+
+// Validation checks by operation type:
+const stateRequirements: Record<string, { requiredProperties?: string[]; forbiddenProperties?: string[] }> = {
+  [LinkRelation.CHECKOUT]: {
+    forbiddenProperties: ['r_lock_owner'], // Cannot checkout if already locked
+  },
+  [LinkRelation.CANCEL_CHECKOUT]: {
+    requiredProperties: ['r_lock_owner'], // Must be locked to cancel checkout
+  },
+  [LinkRelation.CHECKIN_NEXT_MAJOR]: {
+    requiredProperties: ['r_lock_owner'],
+  },
+};
+```
+
+#### 6.1.3. Navigation API
+
+```typescript
+class Navigation {
+  // Basic link following
+  static async follow<T extends Linkable>(
+    client: DocumentumClient,
+    resource: T,
+    relation: LinkRelation
+  ): Promise<HttpResponse<T>>;
+
+  static async followFeed<T extends Linkable>(
+    client: DocumentumClient,
+    resource: T,
+    relation: LinkRelation
+  ): Promise<HttpResponse<Feed<T>>>;
+
+  // State-aware with validation
+  static async followWithValidation<T extends Linkable>(
+    client: DocumentumClient,
+    resource: T,
+    relation: LinkRelation,
+    options?: { validateState?: boolean }
+  ): Promise<HttpResponse<T>>;
+
+  // Check validity without making a request
+  static validateLink(
+    resource: Linkable,
+    relation: LinkRelation
+  ): ValidationError | null;
+
+  static validateState(
+    resource: PersistentObject,
+    relation: LinkRelation
+  ): ValidationError | null;
+}
+```
+
 ---
 
 ## 7. Query Options
@@ -358,9 +596,9 @@ const client = new DocumentumClient.Builder()
 
 The client adds the `Authorization: Basic <base64>` header to every request.
 
-### 8.2. CSRF Token Support (REST Services v7.2+)
+### 8.2. CSRF Token Support (REST Services v7.2+) — Gated Initialization
 
-The Java client implements the CSRF client token protocol. This client should mirror that support:
+The Java client implements the CSRF client token protocol. This client mirrors that support with the gated initialization model:
 
 ```typescript
 const client = new DocumentumClient.Builder()
@@ -368,11 +606,51 @@ const client = new DocumentumClient.Builder()
   .credentials('user', 'password')
   .enableCsrfProtection(true)  // Default: true
   .build();
+
+// ============================================================
+// MANDATORY: Gated initialization acquires CSRF token
+// ============================================================
+await client.initialize();  // Fetches Home Document and captures CSRF headers
 ```
 
-When enabled, the client:
-1. Fetches the CSRF token name/value from the home document on first request
-2. Echoes the token on subsequent mutating requests (POST, PUT, DELETE)
+**How the gated initialization acquires the CSRF token:**
+
+1. **Builder Configuration**: The client is configured with `enableCsrfProtection(true)` (default).
+2. **Initialization Phase**: When `client.initialize()` is called:
+   - The client makes a GET request to the Home Document endpoint.
+   - The server responds with CSRF token headers (e.g., `DCTM-CSRF-TOKEN`).
+   - The client extracts the token name and value from the response headers.
+   - The token is stored internally for use on subsequent mutating requests.
+3. **Operational Phase**: On any mutating request (POST, PUT, DELETE):
+   - The client automatically adds the CSRF header using the stored token.
+   - If no token was acquired (e.g., server doesn't support CSRF), requests proceed without the header.
+
+**Why this approach eliminates the "blind spot":**
+
+- The CSRF token acquisition happens **before** any business operations can execute.
+- There is no window where a mutating request might go out without the CSRF header.
+- If the server requires CSRF but doesn't provide a token during initialization, the client fails fast with a clear error.
+
+```typescript
+// Error scenarios
+
+// 1. CSRF required but server didn't provide token
+try {
+  await client.initialize();
+} catch (error) {
+  if (error instanceof CsrfTokenError) {
+    console.log('Server requires CSRF but did not provide token');
+  }
+}
+
+// 2. Using client before initialization
+const client2 = new DocumentumClient.Builder()
+  .baseUrl('https://documentum-server/dctm-rest')
+  .credentials('user', 'password')
+  .build();
+
+await client2.getCabinets(); // Throws ClientNotInitializedError
+```
 
 ---
 
@@ -459,13 +737,16 @@ While out of scope for the initial release, the following could be added later:
 - [ ] Client builder with HTTP agent detection (ADR-001)
 - [ ] Basic authentication
 - [ ] Home document and repository discovery
-- [ ] Link relation constants
+- [ ] Link relation constants (`LinkRelation` enum)
 - [ ] Error handling infrastructure
+- [ ] **Gated initialization with CSRF token acquisition**
+- [ ] **State-aware navigation helpers with validation**
+- [ ] **Streaming support (ReadableStream)**
 
 ### Phase 2: Core Resources
 
 - [ ] Cabinet, Folder, Document CRUD
-- [ ] Content upload/download
+- [ ] Content upload/download (with streaming)
 - [ ] Version management (checkout, checkin)
 - [ ] Feed/Entry handling with paging
 
@@ -481,7 +762,7 @@ While out of scope for the initial release, the following could be added later:
 - [ ] Batch operations
 - [ ] Lifecycle management
 - [ ] Relations
-- [ ] CSRF token support
+- [ ~~] CSRF token support~~ (moved to Phase 1)
 
 ---
 

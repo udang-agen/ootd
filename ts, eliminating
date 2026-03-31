@@ -1,0 +1,437 @@
+[1mdiff --git a/docs/rfc/rfc-001-typescript-client-design.md b/docs/rfc/rfc-001-typescript-client-design.md[m
+[1mindex c211122..6c1bf24 100644[m
+[1m--- a/docs/rfc/rfc-001-typescript-client-design.md[m
+[1m+++ b/docs/rfc/rfc-001-typescript-client-design.md[m
+[36m@@ -58,7 +58,8 @@[m [mootd/[m
+ ├── index.ts                 # Public API entry point[m
+ ├── client/[m
+ │   ├── DocumentumClient.ts  # Main client class[m
+[31m-│   └── builder.ts           # Fluent builder for client construction[m
+[32m+[m[32m│   ├── builder.ts           # Fluent builder for client construction[m
+[32m+[m[32m│   └── navigation.ts        # State-aware link navigation helpers[m
+ ├── resources/[m
+ │   ├── HomeDocument.ts      # Entry point resource[m
+ │   ├── Repository.ts         # Repository resource[m
+[36m@@ -78,7 +79,8 @@[m [mootd/[m
+ │   ├── query.ts             # DQL and search operations[m
+ │   └── batch.ts             # Batch operation support[m
+ ├── links/[m
+[31m-│   └── LinkRelation.ts       # Link relation constants and helpers[m
+[32m+[m[32m│   ├── LinkRelation.ts       # Link relation constants and helpers[m
+[32m+[m[32m│   └── LinkValidator.ts      # Link existence and state validation[m
+ ├── options/[m
+ │   ├── FeedOptions.ts        # Collection query options[m
+ │   ├── SingleOptions.ts      # Single resource options[m
+[36m@@ -87,14 +89,17 @@[m [mootd/[m
+ │   ├── Link.ts               # Hypermedia link model[m
+ │   ├── PersistentObject.ts   # Base model for all objects[m
+ │   └── errors/[m
+[31m-│       └── RestError.ts      # Structured error handling[m
+[31m-└── http/[m
+[31m-    └── typeGuards.ts         # Type guards for response discrimination[m
+[32m+[m[32m│       ├── RestError.ts      # Structured error handling[m
+[32m+[m[32m│       └── ValidationError.ts # Navigation validation errors[m
+[32m+[m[32m├── http/[m
+[32m+[m[32m│   └── typeGuards.ts         # Type guards for response discrimination[m
+[32m+[m[32m└── streaming/[m
+[32m+[m[32m    └── StreamHandler.ts      # ReadableStream handling for axios/fetch[m
+ ```[m
+ [m
+ ### 3.2. Client Construction[m
+ [m
+[31m-Following the Builder pattern from the Java client, but with TypeScript idioms:[m
+[32m+[m[32mFollowing the Builder pattern from the Java client, but with TypeScript idioms and a mandatory initialization step:[m
+ [m
+ ```typescript[m
+ import { DocumentumClient } from 'ootd';[m
+[36m@@ -113,6 +118,50 @@[m [mconst client = new DocumentumClient.Builder()[m
+   .credentials('user', 'password')[m
+   .repository('REPO01')[m
+   .build(); // Automatically uses fetch if axios unavailable[m
+[32m+[m
+[32m+[m[32m// ============================================================[m
+[32m+[m[32m// MANDATORY: Initialize client before any operations[m
+[32m+[m[32m// ============================================================[m
+[32m+[m[32m// This step performs the "handshake" — fetches the Home Document[m
+[32m+[m[32m// and acquires CSRF tokens from server headers. No business[m
+[32m+[m[32m// operations can proceed until initialization completes.[m
+[32m+[m[32mawait client.initialize();[m
+[32m+[m
+[32m+[m[32m// Now the client is ready for use[m
+[32m+[m[32mconst home = await client.getHomeDocument();[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m#### 3.2.1. Gated Initialization Design[m
+[32m+[m
+[32m+[m[32mThe client enforces a two-phase lifecycle to eliminate "blind spot" requests:[m
+[32m+[m
+[32m+[m[32m| Phase | Method | Purpose |[m
+[32m+[m[32m|---|---|---|[m
+[32m+[m[32m| **Construction** | `new Builder().build()` | Creates client instance, configures base URL, credentials, repository |[m
+[32m+[m[32m| **Initialization** | `client.initialize()` | Fetches Home Document, acquires CSRF token, validates repository access |[m
+[32m+[m[32m| **Operational** | All other methods | Business operations (requires prior `initialize()`) |[m
+[32m+[m
+[32m+[m[32m**Why gated initialization?**[m
+[32m+[m
+[32m+[m[32m- **CSRF Token Acquisition**: The Home Document response contains CSRF token headers (for REST Services v7.2+). These must be captured before any mutating requests.[m
+[32m+[m[32m- **Security Headers**: Prevents requests that might lack necessary security headers.[m
+[32m+[m[32m- **Early Failure**: Validates repository existence and accessibility up-front rather than on first business operation.[m
+[32m+[m[32m- **State Awareness**: The initialized client has the Home Document cached for link traversal.[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32m// Error: Client not initialized[m
+[32m+[m[32mconst client = new DocumentumClient.Builder()[m
+[32m+[m[32m  .baseUrl('https://documentum-server/dctm-rest')[m
+[32m+[m[32m  .credentials('user', 'password')[m
+[32m+[m[32m  .repository('REPO01')[m
+[32m+[m[32m  .build();[m
+[32m+[m
+[32m+[m[32m// Throws ClientNotInitializedError[m
+[32m+[m[32mawait client.getCabinets();[m
+[32m+[m
+[32m+[m[32m// Correct: Initialize first[m
+[32m+[m[32mawait client.initialize();[m
+[32m+[m[32mawait client.getCabinets(); // OK[m
+ ```[m
+ [m
+ ### 3.3. Response Types (ADR-001)[m
+[36m@@ -130,6 +179,15 @@[m [mfunction isAxiosResponse<T>(resp: HttpResponse<T>): resp is AxiosResponse<T> {[m
+ }[m
+ ```[m
+ [m
+[32m+[m[32mFor streaming responses, the discriminated union includes `ReadableStream`:[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32mtype HttpStreamResponse = AxiosResponse<NodeJS.ReadableStream> | Response;[m
+[32m+[m
+[32m+[m[32m// In fetch: Response.body is a ReadableStream | null[m
+[32m+[m[32m// In axios (Node.js): response.data is NodeJS.ReadableStream when responseType is 'stream'[m
+[32m+[m[32m```[m
+[32m+[m
+ ---[m
+ [m
+ ## 4. Resource Model Design[m
+[36m@@ -206,11 +264,14 @@[m [minterface Cabinet extends Folder {[m
+ [m
+ ## 5. API Surface[m
+ [m
+[31m-### 5.1. Entry Point[m
+[32m+[m[32m### 5.1. Entry Point and Initialization[m
+ [m
+ ```typescript[m
+ interface DocumentumClient {[m
+[31m-  // Bootstrap[m
+[32m+[m[32m  // Gated initialization — MUST be called before any operations[m
+[32m+[m[32m  initialize(): Promise<void>;[m
+[32m+[m
+[32m+[m[32m  // Bootstrap (requires prior initialization)[m
+   getHomeDocument(): Promise<HttpResponse<HomeDocument>>;[m
+   getProductInfo(): Promise<HttpResponse<ProductInfo>>;[m
+   getRepositories(): Promise<HttpResponse<Feed<Repository>>>;[m
+[36m@@ -234,11 +295,14 @@[m [minterface DocumentumClient {[m
+   // Documents[m
+   getDocuments(parent: Linkable, options?: FeedOptions): Promise<HttpResponse<Feed<Document>>>;[m
+   getDocument(id: string, options?: SingleOptions): Promise<HttpResponse<Document>>;[m
+[31m-  createDocument(parent: Linkable, doc: Partial<Document>): Promise<HttpResponse<Document>>;[m
+[32m+[m[32m  createDocument([m
+[32m+[m[32m    parent: Linkable,[m
+[32m+[m[32m    doc: Partial<Document>[m
+[32m+[m[32m  ): Promise<HttpResponse<Document>>;[m
+   createDocumentWithContent([m
+     parent: Linkable,[m
+     doc: Partial<Document>,[m
+[31m-    content: Blob | Buffer,[m
+[32m+[m[32m    content: ReadableStream | Blob | Buffer,[m
+     contentType: string[m
+   ): Promise<HttpResponse<Document>>;[m
+ }[m
+[36m@@ -249,11 +313,58 @@[m [minterface DocumentumClient {[m
+ ```typescript[m
+ interface DocumentumClient {[m
+   getContents(doc: Document): Promise<HttpResponse<Feed<Content>>>;[m
+[31m-  getPrimaryContent(doc: Document): Promise<HttpResponse<Blob>>;[m
+[31m-  uploadContent(doc: Document, content: Blob | Buffer, contentType: string): Promise<HttpResponse<Content>>;[m
+[32m+[m[32m  getPrimaryContent(doc: Document): Promise<HttpResponse<ReadableStream>>;[m
+[32m+[m[32m  uploadContent([m
+[32m+[m[32m    doc: Document,[m
+[32m+[m[32m    content: ReadableStream | Blob | Buffer,[m
+[32m+[m[32m    contentType: string[m
+[32m+[m[32m  ): Promise<HttpResponse<Content>>;[m
+[32m+[m[32m}[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m#### 5.3.1. Streaming Support (ReadableStream)[m
+[32m+[m
+[32m+[m[32mThe client supports `ReadableStream` for both downloads and uploads, providing a modern, high-performance way to handle large content across different environments (Node.js/Browser).[m
+[32m+[m
+[32m+[m[32m**Download (Content Retrieval):**[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32m// Fetch the content as a stream[m
+[32m+[m[32mconst response = await client.getPrimaryContent(document);[m
+[32m+[m[32mconst stream = isAxiosResponse(response)[m
+[32m+[m[32m  ? response.data as NodeJS.ReadableStream  // axios with responseType: 'stream'[m
+[32m+[m[32m  : response.body as ReadableStream;         // native fetch[m
+[32m+[m
+[32m+[m[32m// Process the stream[m
+[32m+[m[32mconst reader = stream.getReader();[m
+[32m+[m[32mwhile (true) {[m
+[32m+[m[32m  const { done, value } = await reader.read();[m
+[32m+[m[32m  if (done) break;[m
+[32m+[m[32m  // Process chunk (value is Uint8Array)[m
+[32m+[m[32m  processChunk(value);[m
+ }[m
+ ```[m
+ [m
+[32m+[m[32m**Upload (Content Creation):**[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32m// Create a ReadableStream from a file or other source[m
+[32m+[m[32mconst fileStream = fs.createReadStream('large-file.pdf');[m
+[32m+[m[32mconst stream = ReadableStream.from(fileStream);[m
+[32m+[m
+[32m+[m[32mawait client.uploadContent(document, stream, 'application/pdf');[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m**Cross-Client Streaming Handling:**[m
+[32m+[m
+[32m+[m[32m| HTTP Agent | Download Stream | Upload Stream |[m
+[32m+[m[32m|---|---|---|[m
+[32m+[m[32m| **fetch** | `Response.body` (ReadableStream) | Pass `ReadableStream` directly to `body` option |[m
+[32m+[m[32m| **axios** (Node.js) | Requires `responseType: 'stream'` → `response.data` (Node.js Readable) | Convert to Node.js Readable or use `FormData` with stream |[m
+[32m+[m[32m| **axios** (Browser) | `response.data` (Blob) | Pass `Blob` or use `FormData` |[m
+[32m+[m
+[32m+[m[32mThe `streaming/StreamHandler.ts` module provides utilities to handle these differences transparently, converting between stream types as needed while preserving the ADR-001 principle of minimal abstraction.[m
+[32m+[m
+ ### 5.4. Version Management[m
+ [m
+ ```typescript[m
+[36m@@ -311,6 +422,133 @@[m [mfunction followLink<T extends Linkable>(resource: T, rel: string): Promise<HttpR[m
+ [m
+ This mirrors the .NET client's self-navigating model objects, but operates at the client level to maintain the ADR-001 principle of no abstraction overhead.[m
+ [m
+[32m+[m[32m### 6.1. State-Aware Navigation Helpers[m
+[32m+[m
+[32m+[m[32mThe navigation module (`client/navigation.ts`) provides **state-aware** link following with pre-flight validation:[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32mimport { Navigation, LinkRelation } from 'ootd';[m
+[32m+[m
+[32m+[m[32m// State-aware navigation with validation[m
+[32m+[m[32mconst cabinet = await Navigation.followWithValidation([m
+[32m+[m[32m  client,[m
+[32m+[m[32m  repository,[m
+[32m+[m[32m  LinkRelation.CABINETS,[m
+[32m+[m[32m  { validateState: true }  // Check resource state before following[m
+[32m+[m[32m);[m
+[32m+[m
+[32m+[m[32m// Pre-flight checks:[m
+[32m+[m[32m// 1. Existence: Does the link relation exist?[m
+[32m+[m[32m// 2. State: Does the resource state allow this action?[m
+[32m+[m
+[32m+[m[32m// Example: Cannot checkout a locked document[m
+[32m+[m[32mconst doc = await client.getDocument(id);[m
+[32m+[m[32mtry {[m
+[32m+[m[32m  const checkedOut = await Navigation.followWithValidation([m
+[32m+[m[32m    client,[m
+[32m+[m[32m    doc,[m
+[32m+[m[32m    LinkRelation.CHECKOUT[m
+[32m+[m[32m  );[m
+[32m+[m[32m} catch (error) {[m
+[32m+[m[32m  if (error instanceof ValidationError) {[m
+[32m+[m[32m    console.log(`Cannot checkout: ${error.reason}`);[m
+[32m+[m[32m    // Possible reasons:[m
+[32m+[m[32m    // - LINK_MISSING: Relation doesn't exist[m
+[32m+[m[32m    // - STATE_FORBIDDEN: Document is locked by another user[m
+[32m+[m[32m    // - STATE_REQUIRED: Required properties missing for this action[m
+[32m+[m[32m  }[m
+[32m+[m[32m}[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m#### 6.1.1. LinkRelation Enum[m
+[32m+[m
+[32m+[m[32mStrongly-typed link relation constants replace stringly-typed relations:[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32menum LinkRelation {[m
+[32m+[m[32m  SELF = 'self',[m
+[32m+[m[32m  REPOSITORIES = 'repositories',[m
+[32m+[m[32m  CABINETS = 'cabinets',[m
+[32m+[m[32m  FOLDERS = 'folders',[m
+[32m+[m[32m  DOCUMENTS = 'documents',[m
+[32m+[m[32m  CONTENTS = 'contents',[m
+[32m+[m[32m  PRIMARY_CONTENT = 'primary-content',[m
+[32m+[m[32m  VERSIONS = 'versions',[m
+[32m+[m[32m  CHECKOUT = 'checkout',[m
+[32m+[m[32m  CANCEL_CHECKOUT = 'cancel-checkout',[m
+[32m+[m[32m  CHECKIN_NEXT_MAJOR = 'checkin-next-major',[m
+[32m+[m[32m  CHECKIN_NEXT_MINOR = 'checkin-next-minor',[m
+[32m+[m[32m  LOCK = 'lock',[m
+[32m+[m[32m  UNLOCK = 'unlock',[m
+[32m+[m[32m  // ... other relations[m
+[32m+[m[32m}[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m#### 6.1.2. ValidationError[m
+[32m+[m
+[32m+[m[32mPre-flight validation failures return a `ValidationError` before any network request:[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32minterface ValidationError extends Error {[m
+[32m+[m[32m  code: 'LINK_MISSING' | 'STATE_FORBIDDEN' | 'STATE_REQUIRED';[m
+[32m+[m[32m  resource: Linkable;[m
+[32m+[m[32m  relation: string;[m
+[32m+[m[32m  reason: string;[m
+[32m+[m[32m  details?: Record<string, unknown>;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m// Validation checks by operation type:[m
+[32m+[m[32mconst stateRequirements: Record<string, { requiredProperties?: string[]; forbiddenProperties?: string[] }> = {[m
+[32m+[m[32m  [LinkRelation.CHECKOUT]: {[m
+[32m+[m[32m    forbiddenProperties: ['r_lock_owner'], // Cannot checkout if already locked[m
+[32m+[m[32m  },[m
+[32m+[m[32m  [LinkRelation.CANCEL_CHECKOUT]: {[m
+[32m+[m[32m    requiredProperties: ['r_lock_owner'], // Must be locked to cancel checkout[m
+[32m+[m[32m  },[m
+[32m+[m[32m  [LinkRelation.CHECKIN_NEXT_MAJOR]: {[m
+[32m+[m[32m    requiredProperties: ['r_lock_owner'],[m
+[32m+[m[32m  },[m
+[32m+[m[32m};[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m#### 6.1.3. Navigation API[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32mclass Navigation {[m
+[32m+[m[32m  // Basic link following[m
+[32m+[m[32m  static async follow<T extends Linkable>([m
+[32m+[m[32m    client: DocumentumClient,[m
+[32m+[m[32m    resource: T,[m
+[32m+[m[32m    relation: LinkRelation[m
+[32m+[m[32m  ): Promise<HttpResponse<T>>;[m
+[32m+[m
+[32m+[m[32m  static async followFeed<T extends Linkable>([m
+[32m+[m[32m    client: DocumentumClient,[m
+[32m+[m[32m    resource: T,[m
+[32m+[m[32m    relation: LinkRelation[m
+[32m+[m[32m  ): Promise<HttpResponse<Feed<T>>>;[m
+[32m+[m
+[32m+[m[32m  // State-aware with validation[m
+[32m+[m[32m  static async followWithValidation<T extends Linkable>([m
+[32m+[m[32m    client: DocumentumClient,[m
+[32m+[m[32m    resource: T,[m
+[32m+[m[32m    relation: LinkRelation,[m
+[32m+[m[32m    options?: { validateState?: boolean }[m
+[32m+[m[32m  ): Promise<HttpResponse<T>>;[m
+[32m+[m
+[32m+[m[32m  // Check validity without making a request[m
+[32m+[m[32m  static validateLink([m
+[32m+[m[32m    resource: Linkable,[m
+[32m+[m[32m    relation: LinkRelation[m
+[32m+[m[32m  ): ValidationError | null;[m
+[32m+[m
+[32m+[m[32m  static validateState([m
+[32m+[m[32m    resource: PersistentObject,[m
+[32m+[m[32m    relation: LinkRelation[m
+[32m+[m[32m  ): ValidationError | null;[m
+[32m+[m[32m}[m
+[32m+[m[32m```[m
+[32m+[m
+ ---[m
+ [m
+ ## 7. Query Options[m
+[36m@@ -358,9 +596,9 @@[m [mconst client = new DocumentumClient.Builder()[m
+ [m
+ The client adds the `Authorization: Basic <base64>` header to every request.[m
+ [m
+[31m-### 8.2. CSRF Token Support (REST Services v7.2+)[m
+[32m+[m[32m### 8.2. CSRF Token Support (REST Services v7.2+) — Gated Initialization[m
+ [m
+[31m-The Java client implements the CSRF client token protocol. This client should mirror that support:[m
+[32m+[m[32mThe Java client implements the CSRF client token protocol. This client mirrors that support with the gated initialization model:[m
+ [m
+ ```typescript[m
+ const client = new DocumentumClient.Builder()[m
+[36m@@ -368,11 +606,51 @@[m [mconst client = new DocumentumClient.Builder()[m
+   .credentials('user', 'password')[m
+   .enableCsrfProtection(true)  // Default: true[m
+   .build();[m
+[32m+[m
+[32m+[m[32m// ============================================================[m
+[32m+[m[32m// MANDATORY: Gated initialization acquires CSRF token[m
+[32m+[m[32m// ============================================================[m
+[32m+[m[32mawait client.initialize();  // Fetches Home Document and captures CSRF headers[m
+ ```[m
+ [m
+[31m-When enabled, the client:[m
+[31m-1. Fetches the CSRF token name/value from the home document on first request[m
+[31m-2. Echoes the token on subsequent mutating requests (POST, PUT, DELETE)[m
+[32m+[m[32m**How the gated initialization acquires the CSRF token:**[m
+[32m+[m
+[32m+[m[32m1. **Builder Configuration**: The client is configured with `enableCsrfProtection(true)` (default).[m
+[32m+[m[32m2. **Initialization Phase**: When `client.initialize()` is called:[m
+[32m+[m[32m   - The client makes a GET request to the Home Document endpoint.[m
+[32m+[m[32m   - The server responds with CSRF token headers (e.g., `DCTM-CSRF-TOKEN`).[m
+[32m+[m[32m   - The client extracts the token name and value from the response headers.[m
+[32m+[m[32m   - The token is stored internally for use on subsequent mutating requests.[m
+[32m+[m[32m3. **Operational Phase**: On any mutating request (POST, PUT, DELETE):[m
+[32m+[m[32m   - The client automatically adds the CSRF header using the stored token.[m
+[32m+[m[32m   - If no token was acquired (e.g., server doesn't support CSRF), requests proceed without the header.[m
+[32m+[m
+[32m+[m[32m**Why this approach eliminates the "blind spot":**[m
+[32m+[m
+[32m+[m[32m- The CSRF token acquisition happens **before** any business operations can execute.[m
+[32m+[m[32m- There is no window where a mutating request might go out without the CSRF header.[m
+[32m+[m[32m- If the server requires CSRF but doesn't provide a token during initialization, the client fails fast with a clear error.[m
+[32m+[m
+[32m+[m[32m```typescript[m
+[32m+[m[32m// Error scenarios[m
+[32m+[m
+[32m+[m[32m// 1. CSRF required but server didn't provide token[m
+[32m+[m[32mtry {[m
+[32m+[m[32m  await client.initialize();[m
+[32m+[m[32m} catch (error) {[m
+[32m+[m[32m  if (error instanceof CsrfTokenError) {[m
+[32m+[m[32m    console.log('Server requires CSRF but did not provide token');[m
+[32m+[m[32m  }[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m// 2. Using client before initialization[m
+[32m+[m[32mconst client2 = new DocumentumClient.Builder()[m
+[32m+[m[32m  .baseUrl('https://documentum-server/dctm-rest')[m
+[32m+[m[32m  .credentials('user', 'password')[m
+[32m+[m[32m  .build();[m
+[32m+[m
+[32m+[m[32mawait client2.getCabinets(); // Throws ClientNotInitializedError[m
+[32m+[m[32m```[m
+ [m
+ ---[m
+ [m
+[36m@@ -459,13 +737,16 @@[m [mWhile out of scope for the initial release, the following could be added later:[m
+ - [ ] Client builder with HTTP agent detection (ADR-001)[m
+ - [ ] Basic authentication[m
+ - [ ] Home document and repository discovery[m
+[31m-- [ ] Link relation constants[m
+[32m+[m[32m- [ ] Link relation constants (`LinkRelation` enum)[m
+ - [ ] Error handling infrastructure[m
+[32m+[m[32m- [ ] **Gated initialization with CSRF token acquisition**[m
+[32m+[m[32m- [ ] **State-aware navigation helpers with validation**[m
+[32m+[m[32m- [ ] **Streaming support (ReadableStream)**[m
+ [m
+ ### Phase 2: Core Resources[m
+ [m
+ - [ ] Cabinet, Folder, Document CRUD[m
+[31m-- [ ] Content upload/download[m
+[32m+[m[32m- [ ] Content upload/download (with streaming)[m
+ - [ ] Version management (checkout, checkin)[m
+ - [ ] Feed/Entry handling with paging[m
+ [m
+[36m@@ -481,7 +762,7 @@[m [mWhile out of scope for the initial release, the following could be added later:[m
+ - [ ] Batch operations[m
+ - [ ] Lifecycle management[m
+ - [ ] Relations[m
+[31m-- [ ] CSRF token support[m
+[32m+[m[32m- [ ~~] CSRF token support~~ (moved to Phase 1)[m
+ [m
+ ---[m
+ [m
