@@ -116,12 +116,12 @@ const client = new DocumentumClient({
   httpAgent: fetch // explicitly use native fetch
 });
 
-// Auto-detect (axios if available, otherwise fetch)
+// Default to fetch() when httpAgent is omitted
 const client = new DocumentumClient({
   baseUrl: 'https://documentum-server/dctm-rest',
   credentials: { username: 'user', password: 'password' },
   repository: 'REPO01'
-  // httpAgent omitted - auto-detect
+  // httpAgent omitted - defaults to fetch()
 });
 ```
 
