@@ -382,7 +382,60 @@ const client = new DocumentumClient({
 
 When enabled, the client:
 1. Fetches the CSRF token name/value from the home document on first request
-2. Echoes the token on subsequent mutating requests (POST, PUT, DELETE)
+2. Updates the token from the response headers of **any** request (GET, POST, PUT, DELETE) when present
+3. Echoes the current token on subsequent mutating requests (POST, PUT, DELETE)
+
+The server may rotate the CSRF token in response headers of any request, and the client must track the most recent token value for use in the next mutation.
+
+### 8.2.1. Serialized Mutating Request Pattern
+
+Given the async-first nature of TypeScript and the concurrent environment in which the client operates, the **Serialized Mutating Request Pattern** ensures CSRF token safety while maintaining ergonomics and strict ordering guarantees for HATEOAS navigation.
+
+#### Concurrent GETs and Token Rotation
+
+GET requests can safely execute concurrently because they do not require a CSRF token to be sent in the request. However, GET responses may still contain updated CSRF tokens in their headers, and the client must capture the latest token for use in subsequent mutations.
+
+When multiple concurrent GETs complete with different token values in their response headers, the client accepts the most recently received token. This is safe because:
+
+1. The server accepts any previously issued token for a limited time window
+2. All concurrent GETs share the same authentication context
+3. Token rotation is monotonic — the server never reverts to an older token
+4. No mutation request is sent until all concurrent reads complete and the token is finalized
+
+This approach maximizes read concurrency while still tracking the latest token state without blocking reads on each other.
+
+#### Promise-Based Mutation Tail
+
+For mutating operations (POST, PUT, DELETE), the client must enforce **strict ordering** to prevent CSRF token race conditions. The **promise-based mutation tail** achieves this without the overhead of a traditional mutex:
+
+```typescript
+private mutationQueue = Promise.resolve();
+
+private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const resultPromise = this.mutationQueue.then(async () => {
+    const result = await operation();
+    return result;
+  });
+  
+  this.mutationQueue = resultPromise.catch(() => {
+    // Continue queue even if this mutation fails
+    return undefined;
+  });
+  
+  return resultPromise;
+}
+```
+
+A promise-based tail is preferred over a standard mutex for several reasons:
+
+1. **Idiomatic to TypeScript/JavaScript** — Leverages native promise chaining rather than introducing synchronization primitives
+2. **Strict ordering guarantees** — The order of initiating mutations in code matches the order of execution, which is critical for HATEOAS where subsequent mutations often depend on state created by previous ones (e.g., create folder → create document inside folder)
+3. **Lightweight** — No additional dependencies or complex lock management
+4. **Error resilience** — A failed mutation does not permanently block the queue; subsequent mutations can proceed with the current token
+5. **Transparent to callers** — Methods return normal promises; the caller's async/await code remains unchanged
+6. **Browser and Node.js compatible** — Works identically across both runtime environments supported by the dual HTTP client architecture
+
+The mutation tail ensures that even if application code initiates multiple mutations concurrently, they execute sequentially with proper CSRF token management, while still allowing callers to `await` each promise independently.
 
 ---
 
