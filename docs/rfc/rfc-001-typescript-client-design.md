@@ -58,7 +58,7 @@ ootd/
 ├── index.ts                 # Public API entry point
 ├── client/
 │   ├── DocumentumClient.ts  # Main client class
-│   └── builder.ts           # Fluent builder for client construction
+│   └── types.ts             # Client configuration types
 ├── resources/
 │   ├── HomeDocument.ts      # Entry point resource
 │   ├── Repository.ts         # Repository resource
@@ -94,25 +94,35 @@ ootd/
 
 ### 3.2. Client Construction
 
-Following the Builder pattern from the Java client, but with TypeScript idioms:
+TypeScript's discriminated union approach eliminates the need for a builder pattern. Instead, the client accepts a configuration object with optional explicit HTTP agent selection:
 
 ```typescript
 import { DocumentumClient } from 'ootd';
 import axios from 'axios';
 
-// Using axios (if installed)
-const client = new DocumentumClient.Builder()
-  .baseUrl('https://documentum-server/dctm-rest')
-  .credentials('user', 'password')
-  .repository('REPO01')
-  .build();
+// Using axios explicitly
+const client = new DocumentumClient({
+  baseUrl: 'https://documentum-server/dctm-rest',
+  credentials: { username: 'user', password: 'password' },
+  repository: 'REPO01',
+  httpAgent: axios // explicitly pass axios instance
+});
 
-// Or using native fetch (if axios is not installed)
-const client = new DocumentumClient.Builder()
-  .baseUrl('https://documentum-server/dctm-rest')
-  .credentials('user', 'password')
-  .repository('REPO01')
-  .build(); // Automatically uses fetch if axios unavailable
+// Using native fetch explicitly
+const client = new DocumentumClient({
+  baseUrl: 'https://documentum-server/dctm-rest',
+  credentials: { username: 'user', password: 'password' },
+  repository: 'REPO01',
+  httpAgent: fetch // explicitly use native fetch
+});
+
+// Default to fetch() when httpAgent is omitted
+const client = new DocumentumClient({
+  baseUrl: 'https://documentum-server/dctm-rest',
+  credentials: { username: 'user', password: 'password' },
+  repository: 'REPO01'
+  // httpAgent omitted - defaults to fetch()
+});
 ```
 
 ### 3.3. Response Types (ADR-001)
@@ -350,10 +360,10 @@ interface SearchOptions {
 Default and primary authentication mechanism:
 
 ```typescript
-const client = new DocumentumClient.Builder()
-  .baseUrl('https://documentum-server/dctm-rest')
-  .credentials('user', 'password')
-  .build();
+const client = new DocumentumClient({
+  baseUrl: 'https://documentum-server/dctm-rest',
+  credentials: { username: 'user', password: 'password' }
+});
 ```
 
 The client adds the `Authorization: Basic <base64>` header to every request.
@@ -363,11 +373,11 @@ The client adds the `Authorization: Basic <base64>` header to every request.
 The Java client implements the CSRF client token protocol. This client should mirror that support:
 
 ```typescript
-const client = new DocumentumClient.Builder()
-  .baseUrl('https://documentum-server/dctm-rest')
-  .credentials('user', 'password')
-  .enableCsrfProtection(true)  // Default: true
-  .build();
+const client = new DocumentumClient({
+  baseUrl: 'https://documentum-server/dctm-rest',
+  credentials: { username: 'user', password: 'password' },
+  enableCsrfProtection: true  // Default: true
+});
 ```
 
 When enabled, the client:
@@ -456,7 +466,7 @@ While out of scope for the initial release, the following could be added later:
 
 ### Phase 1: Core Infrastructure
 
-- [ ] Client builder with HTTP agent detection (ADR-001)
+- [ ] Client config with HTTP agent detection (ADR-001)
 - [ ] Basic authentication
 - [ ] Home document and repository discovery
 - [ ] Link relation constants
