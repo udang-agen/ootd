@@ -70,7 +70,7 @@ Moving these to the client ensures:
 - Implement typed options interfaces (`FeedOptions`, `SingleOptions`, `SearchOptions`) to ensure type‑safe configuration for queries, pagination, and filters.
 
 ### 7. CSRF Token Management and Discovery
-The client will implement a dynamic CSRF discovery protocol based on the reference Java client (`AbstractRestTemplateClient`).
+The client will implement a dynamic CSRF discovery protocol based on the reference Java client (`AbstractRestTemplateClient`). See [CSRF and Client Token Behavior](../notes/csrf-token-behavior.md) for a detailed breakdown of this protocol.
 
 #### Discovery Mechanisms
 The client must monitor specific response headers to discover and track CSRF tokens:
