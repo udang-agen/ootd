@@ -127,3 +127,4 @@ class DocumentumClient {
 - RFC-001: TypeScript Client Design for Documentum Content Server
 - ADR-001: Dual HTTP Client Support for RESTful Client Package
 - Java Reference: `AbstractRestTemplateClient.java` (CSRF and navigation logic)
+- [CSRF and Client Token Behavior](../notes/csrf-token-behavior.md)
