@@ -71,3 +71,31 @@ export {
   PROPERTY_PREFIXES,
   categorizeProperties,
 } from './types/properties.js';
+
+// HTTP layer
+export type {
+  HttpResponse,
+  RestError,
+  ResponseError,
+} from './http/typeGuards.js';
+export {
+  isAxiosResponse,
+  parseErrorResponse,
+  parseAxiosErrorResponse,
+} from './http/typeGuards.js';
+
+// Client
+export { DocumentumClient } from './client/DocumentumClient.js';
+export type {
+  DocumentumClientConfig,
+  Credentials,
+  FeedOptions,
+  SingleOptions,
+  SearchOptions,
+  BatchRequest,
+  HomeDocument,
+  ProductInfo,
+  Repository,
+  User,
+  Group,
+} from './client/types.js';
